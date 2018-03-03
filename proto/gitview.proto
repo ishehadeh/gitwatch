@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+option go_package = "gitview";
+
+package github;
+
+service Github {
+    rpc Subscribe(Target) returns (stream Event) {};
+}
+
+enum EventType {
+    PULL_REQUEST = 0;
+    PUSH         = 1;
+}
+
+enum PullRequestAction {
+    ASSIGNED               = 0;
+    UNASSIGNED             = 1;
+    REVIEW_REQUESTED       = 2;
+    REVIEW_REQUEST_REMOVED = 3;
+    LABELED                = 4;
+    UNLABELED              = 5;
+    OPENED                 = 6;
+    CLOSED                 = 7;
+    REOPENED               = 8;
+}
+
+enum PullRequestState {
+    PR_OPENED = 0;
+    PR_CLOSED = 1;
+}
+
+message Target {
+    string user       = 1;
+    string repo       = 2;
+    EventType event   = 4;
+}
+
+
+message Repo {
+    int64 id    = 1;
+    string name = 2;
+}
+
+message User {
+    int64 id      = 1;
+    string name   = 2;
+    string avatar = 3;
+}
+
+message Org {
+    int64 id      = 1;
+    string name   = 2;
+    string avatar = 3;
+}
+
+message PushPayload {
+    string ref    = 1;
+    string head   = 2;
+    string before = 3;
+}
+
+message PullRequestPayload {
+    PullRequestAction action = 1;
+    int32             number = 2;
+    PullRequestState  state  = 3;
+
+    int64 id     = 4;
+    string title = 5;
+
+    string diff_url  = 7;
+    string patch_url = 8;
+    
+    string body = 9;
+}
+
+message Event {
+    Repo repo = 1;
+    Org  org  = 2;
+    User user = 3;
+
+    oneof payload {
+        PushPayload        push         = 4;
+        PullRequestPayload pull_request = 5;
+    }
+}
