@@ -1,25 +1,17 @@
-package main
+package gitwatch
 
 import (
-	"context"
 	"crypto/rand"
-	"fmt"
+	fmt "fmt"
 	"log"
 	unsafe_rand "math/rand"
 	"net"
 	"net/http"
-	"os"
-	"runtime"
-	"strings"
 	"sync"
 
-	pb "github.com/IanS5/services/gitview"
 	"github.com/google/go-github/github"
 	"google.golang.org/grpc"
 )
-
-// NAME is the name used for subscriptions to github webhooks
-var NAME = "web"
 
 // A MissingUserErr indicates a user was not found
 type MissingUserErr struct {
@@ -31,49 +23,37 @@ func (e MissingUserErr) Error() string {
 }
 
 type Subscription struct {
-	stream pb.Github_SubscribeServer
+	stream Github_SubscribeServer
 	id     uint64
 }
 
-// A HookListener listens for POSTs from the github hooks API
-type HookListener struct {
+// A Server listens for POSTs from the github hooks API and gRPC calls
+type Server struct {
 	lock          sync.RWMutex
 	client        *github.Client
 	target        string
 	subscriptions map[string][]Subscription
 	secret        []byte
+	grpcAddr      string
 }
 
 // GetSubscriptions gets all subscribers to event on a repo.
-func (hl *HookListener) GetSubscriptions(repo string, event string) []Subscription {
+func (hl *Server) GetSubscriptions(repo string, event string) []Subscription {
 	return hl.subscriptions[repo+"#"+event]
 }
 
 // GetSecret gets a secret
-func (hl *HookListener) GetSecret() []byte {
+func (hl *Server) GetSecret() []byte {
 	return hl.secret
 }
 
 // AddSubscription subscribes a user to a repo event
-func (hl *HookListener) AddSubscription(repo string, event string, sub Subscription) error {
+func (hl *Server) AddSubscription(repo string, event string, sub Subscription) error {
 	log.Printf("[method AddSubscription] status, msg = %q, repo = %q, event = %q, id = \"%d\" ", "adding subscriber", repo, event, sub.id)
 
 	hl.lock.Lock()
 	subs := hl.GetSubscriptions(repo, event)
 	if subs == nil {
-		repoParts := strings.Split(repo, "/")
-		_, _, err := hl.client.Repositories.CreateHook(context.TODO(), repoParts[0], repoParts[1], &github.Hook{
-			Name:   &NAME,
-			URL:    &hl.target,
-			Events: []string{event},
-			Config: map[string]interface{}{
-				"url":    hl.target,
-				"secret": hl.GetSecret(),
-			},
-		})
-		if err != nil {
-			return err
-		}
 		hl.subscriptions[repo+"#"+event] = []Subscription{sub}
 	} else {
 		hl.subscriptions[repo+"#"+event] = append(subs, sub)
@@ -83,7 +63,7 @@ func (hl *HookListener) AddSubscription(repo string, event string, sub Subscript
 }
 
 // RemoveSubscription removes a user subscription to a event.
-func (hl *HookListener) RemoveSubscription(repo string, event string, user uint64) error {
+func (hl *Server) RemoveSubscription(repo string, event string, user uint64) error {
 	log.Printf("[method RemoveSubscription] status, msg = %q, repo = %q, event = %q, id = \"%d\"", "removing subscriber", repo, event, user)
 
 	hl.lock.Lock()
@@ -103,7 +83,7 @@ func (hl *HookListener) RemoveSubscription(repo string, event string, user uint6
 	}
 }
 
-func (hl *HookListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (hl *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqid := hl.GenID()
 	log.Printf("[req %d] status, msg = %q user-agent = %q, remote = %q", reqid, "initialize", r.UserAgent(), r.RemoteAddr)
 
@@ -120,7 +100,7 @@ func (hl *HookListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", 400)
 		return
 	}
-	var ev pb.Event
+	var ev Event
 	var subscribers []Subscription
 	log.Printf("[req %d] status, msg = %q", reqid, "successfully parsed hook")
 	switch event := event.(type) {
@@ -136,17 +116,17 @@ func (hl *HookListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			event.GetRepo().GetFullName(),
 			len(subscribers))
 
-		ev = pb.Event{
-			Repo: &pb.Repo{
+		ev = Event{
+			Repo: &Repo{
 				Id:   event.GetRepo().GetID(),
 				Name: event.GetRepo().GetFullName(),
 			},
-			User: &pb.User{
+			User: &User{
 				Id:   event.GetPusher().GetID(),
 				Name: event.GetPusher().GetName(),
 			},
-			Payload: &pb.Event_Push{
-				Push: &pb.PushPayload{
+			Payload: &Event_Push{
+				Push: &PushPayload{
 					Ref:    event.GetRef(),
 					Before: event.GetBefore(),
 					Head:   event.GetHead(),
@@ -165,17 +145,17 @@ func (hl *HookListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"sending event to subscribers", "pull_request",
 			event.GetRepo().GetFullName(),
 			len(subscribers))
-		ev = pb.Event{
-			Repo: &pb.Repo{
+		ev = Event{
+			Repo: &Repo{
 				Id:   event.GetRepo().GetID(),
 				Name: event.GetRepo().GetFullName(),
 			},
-			User: &pb.User{
+			User: &User{
 				Id:   event.GetSender().GetID(),
 				Name: event.GetSender().GetName(),
 			},
-			Payload: &pb.Event_PullRequest{
-				PullRequest: &pb.PullRequestPayload{
+			Payload: &Event_PullRequest{
+				PullRequest: &PullRequestPayload{
 					Action:   PullRequestActionFromString(event.GetAction()),
 					Number:   int32(event.GetNumber()),
 					State:    PullRequestStateFromString(event.GetPullRequest().GetState()),
@@ -201,27 +181,28 @@ func (hl *HookListener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // GenID generates a new 64 bit ID for a subscription
-func (hl *HookListener) GenID() uint64 {
+func (hl *Server) GenID() uint64 {
 	return unsafe_rand.Uint64()
 }
 
 // Subscribe is for an implementation of the github proto service
-func (hl *HookListener) Subscribe(target *pb.Target, stream pb.Github_SubscribeServer) error {
+func (hl *Server) Subscribe(target *Target, stream Github_SubscribeServer) error {
 	log.Printf("[grpc-method Subscribe] status, msg = %q", "subscription requested")
 
-	return hl.AddSubscription(target.Repo, target.User, Subscription{
+	return hl.AddSubscription(target.User+"/"+target.Repo, EventTypeToString(target.Event), Subscription{
 		stream: stream,
 		id:     hl.GenID(),
 	})
 }
 
-// NewHookListener initializes a hook listener with no users
-func NewHookListener(target string) HookListener {
+// NewServer initializes a hook listener with no users
+func NewServer(hookTarget, grpcAddr string) Server {
 	secretBuf := make([]byte, 20)
 	rand.Read(secretBuf)
-	return HookListener{
+	return Server{
+		grpcAddr:      grpcAddr,
 		lock:          sync.RWMutex{},
-		target:        target,
+		target:        hookTarget,
 		client:        github.NewClient(nil),
 		subscriptions: make(map[string][]Subscription),
 		secret:        secretBuf,
@@ -229,77 +210,86 @@ func NewHookListener(target string) HookListener {
 }
 
 // PullRequestActionFromString translates a pull request action string from the github api to the protobuf enum
-func PullRequestActionFromString(pra string) pb.PullRequestAction {
+func PullRequestActionFromString(pra string) PullRequestAction {
 	switch pra {
 	case "assigned":
-		return pb.PullRequestAction_ASSIGNED
+		return PullRequestAction_ASSIGNED
 	case "unassigned":
-		return pb.PullRequestAction_UNASSIGNED
+		return PullRequestAction_UNASSIGNED
 	case "review_requested":
-		return pb.PullRequestAction_REVIEW_REQUESTED
+		return PullRequestAction_REVIEW_REQUESTED
 	case "review_request_removed":
-		return pb.PullRequestAction_REVIEW_REQUEST_REMOVED
+		return PullRequestAction_REVIEW_REQUEST_REMOVED
 	case "labeled":
-		return pb.PullRequestAction_LABELED
+		return PullRequestAction_LABELED
 	case "unlabeled":
-		return pb.PullRequestAction_UNLABELED
+		return PullRequestAction_UNLABELED
 	case "opened":
-		return pb.PullRequestAction_OPENED
+		return PullRequestAction_OPENED
 	case "closed":
-		return pb.PullRequestAction_CLOSED
+		return PullRequestAction_CLOSED
 	case "reopened":
-		return pb.PullRequestAction_REOPENED
+		return PullRequestAction_REOPENED
 	}
 	return -1
 }
 
 // PullRequestStateFromString translates a pull request state string from the github api to the protobuf enum
-func PullRequestStateFromString(prs string) pb.PullRequestState {
+func PullRequestStateFromString(prs string) PullRequestState {
 	switch prs {
 	case "opened":
-		return pb.PullRequestState_PR_OPENED
+		return PullRequestState_PR_OPENED
 	case "closed":
-		return pb.PullRequestState_PR_CLOSED
+		return PullRequestState_PR_CLOSED
 	}
 	return -1
 }
 
-// StartGRPC starts the gRPC server
-func StartGRPC(addr string, handler *HookListener) error {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	srv := grpc.NewServer()
-	pb.RegisterGithubServer(srv, handler)
-	return srv.Serve(listener)
-}
-
-func main() {
-	if len(os.Args) < 3 {
-		fmt.Printf("USAGE: %s [HOOK ADDRESS] [GRPC ADDRESS]", os.Args[0])
-		os.Exit(1)
-	}
-	handler := NewHookListener(os.Args[1])
+func (hl *Server) ListenAndServe() (err error) {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	go func() {
-		tid := runtime.NumGoroutine()
-		err := http.ListenAndServe(os.Args[1], &handler)
+		err = http.ListenAndServe(hl.target, hl)
 		if err != nil {
-			log.Fatalf("[goroutine %d] error, msg = \"%v\", fatal = %q", tid, err, "true")
+			return
 		}
 		wg.Done()
 	}()
 
 	go func() {
-		tid := runtime.NumGoroutine()
-		err := StartGRPC(os.Args[2], &handler)
+		var listener net.Listener
+		listener, err = net.Listen("tcp", hl.grpcAddr)
 		if err != nil {
-			log.Fatalf("[goroutine %d] error, msg = \"%v\", fatal = %q", tid, err, "true")
+			return
+		}
+		srv := grpc.NewServer()
+		RegisterGithubServer(srv, hl)
+		err = srv.Serve(listener)
+		if err != nil {
+			return
 		}
 		wg.Done()
 	}()
 	wg.Wait()
-	fmt.Println("done")
+	return
+}
+
+func EventTypeFromString(evt string) EventType {
+	switch evt {
+	case "pull_request":
+		return EventType_PULL_REQUEST
+	case "push":
+		return EventType_PUSH
+	}
+	return -1
+}
+
+func EventTypeToString(evt EventType) string {
+	switch evt {
+	case EventType_PULL_REQUEST:
+		return "pull_request"
+	case EventType_PUSH:
+		return "push"
+	}
+	return ""
 }

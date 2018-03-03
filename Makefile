@@ -3,22 +3,22 @@ DOCKER = docker
 PROTOC = protoc
 MAKE   = make
 
-GENERATED_SRC = proto/gitview.proto
-GENERATED     = gitview_pb/gitview.pb.go
-SRC           = cmd/main.go
+GENERATED_SRC = proto/gitwatch.proto
+GENERATED     = gitwatch_pb/gitwatch.pb.go
+SRC           = cmd/gitwatch.go
 
-build: gitview
+build: gitwatch
 
 $(GENERATED): $(GENERATED_SRC)
 	protoc --proto_path=./proto --go_out=plugins=grpc,import_path=.:. $<
 
 docker:
 	GOARCH=amd64 GOOS="linux" make build $(SRC)
-	$(DOCKER) build . -t gitview
-	rm gitview
+	$(DOCKER) build . -t gitwatch
+	rm gitwatch
 
-gitview: $(SRC)
+gitwatch: $(SRC)
 	$(GO) build -o $@ $<
 
 clean:
-	rm gitview
+	rm gitwatch
