@@ -3,11 +3,13 @@ DOCKER = docker
 PROTOC = protoc
 MAKE   = make
 
-GENERATED_SRC = proto/gitwatch.proto
-GENERATED     = gitwatch_pb/gitwatch.pb.go
+GENERATED_SRC = proto/github.proto
+GENERATED     = github.pb.go
 SRC           = cmd/gitwatch.go
 
-build: gitwatch
+build: generate gitwatch
+
+generate: $(GENERATED)
 
 $(GENERATED): $(GENERATED_SRC)
 	protoc --proto_path=./proto --go_out=plugins=grpc,import_path=.:. $<

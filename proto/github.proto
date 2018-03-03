@@ -5,7 +5,7 @@ option go_package = "gitwatch";
 package github;
 
 service Github {
-    rpc Subscribe(Target) returns (stream Event) {};
+    rpc Subscribe(Target) returns (stream Event);
 }
 
 enum EventType {

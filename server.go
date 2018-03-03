@@ -3,11 +3,10 @@ package gitwatch
 import (
 	"crypto/rand"
 	fmt "fmt"
-	"log"
-	unsafe_rand "math/rand"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/go-github/github"
 	"google.golang.org/grpc"
@@ -23,8 +22,8 @@ func (e MissingUserErr) Error() string {
 }
 
 type Subscription struct {
-	stream Github_SubscribeServer
-	id     uint64
+	githubStream Github_SubscribeServer
+	id           uint64
 }
 
 // A Server listens for POSTs from the github hooks API and gRPC calls
@@ -49,7 +48,6 @@ func (hl *Server) GetSecret() []byte {
 
 // AddSubscription subscribes a user to a repo event
 func (hl *Server) AddSubscription(repo string, event string, sub Subscription) error {
-	log.Printf("[method AddSubscription] status, msg = %q, repo = %q, event = %q, id = \"%d\" ", "adding subscriber", repo, event, sub.id)
 
 	hl.lock.Lock()
 	subs := hl.GetSubscriptions(repo, event)
@@ -64,7 +62,6 @@ func (hl *Server) AddSubscription(repo string, event string, sub Subscription) e
 
 // RemoveSubscription removes a user subscription to a event.
 func (hl *Server) RemoveSubscription(repo string, event string, user uint64) error {
-	log.Printf("[method RemoveSubscription] status, msg = %q, repo = %q, event = %q, id = \"%d\"", "removing subscriber", repo, event, user)
 
 	hl.lock.Lock()
 	subSlice := hl.GetSubscriptions(repo, event)
@@ -84,37 +81,31 @@ func (hl *Server) RemoveSubscription(repo string, event string, user uint64) err
 }
 
 func (hl *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	reqid := hl.GenID()
-	log.Printf("[req %d] status, msg = %q user-agent = %q, remote = %q", reqid, "initialize", r.UserAgent(), r.RemoteAddr)
 
 	payload, err := github.ValidatePayload(r, hl.GetSecret())
 	if err != nil {
-		log.Printf("[req %d] error, msg = \"%v\", response = %q, status = \"%d\", fatal = %q", reqid, err, "invalid payload", 400, "false")
 		http.Error(w, "invalid payload", 400)
 		return
 	}
 	typ := github.WebHookType(r)
 	event, err := github.ParseWebHook(typ, payload)
 	if err != nil {
-		log.Printf("[req %d] error, msg = \"%v\", response = %q, status = \"%d\", fatal = %q", reqid, err, "invalid payload", 400, "false")
 		http.Error(w, "invalid payload", 400)
 		return
 	}
 	var ev Event
 	var subscribers []Subscription
-	log.Printf("[req %d] status, msg = %q", reqid, "successfully parsed hook")
+	var eventType string
+	var repo string
+
 	switch event := event.(type) {
 	case *github.PushEvent:
+		eventType = "push"
+		repo = event.GetRepo().GetFullName()
 		subscribers = hl.GetSubscriptions(event.GetRepo().GetFullName(), "push")
 		if subscribers == nil {
-			log.Printf("[req %d] error, msg = \"%v\", response = %q, status = \"%d\", fatal = %q", reqid, "no subscribers to event", "(null)", 200, "false")
 			return
 		}
-		log.Printf("[req %d] status, msg = %q, event = %q, repo = %q, sub-count = \"%d\"",
-			reqid,
-			"sending event to subscribers", "push",
-			event.GetRepo().GetFullName(),
-			len(subscribers))
 
 		ev = Event{
 			Repo: &Repo{
@@ -135,16 +126,13 @@ func (hl *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case *github.PullRequestEvent:
+		eventType = "pull_request"
+		repo = event.GetRepo().GetFullName()
 		subscribers = hl.GetSubscriptions(event.GetRepo().GetFullName(), "pull_request")
 		if subscribers == nil {
-			log.Printf("[req %d] error, msg = \"%v\", response = %q, status = \"%d\", fatal = %q", reqid, "no subscribers to event", "(null)", 200, "false")
 			return
 		}
-		log.Printf("[req %d] status, msg = %q, event = %q, repo = %q, sub-count = \"%d\"",
-			reqid,
-			"sending event to subscribers", "pull_request",
-			event.GetRepo().GetFullName(),
-			len(subscribers))
+
 		ev = Event{
 			Repo: &Repo{
 				Id:   event.GetRepo().GetID(),
@@ -172,26 +160,23 @@ func (hl *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, sub := range subscribers {
-		log.Printf("[req %d] status, msg = %q, subscriber = \"%d\"", reqid, "sending event to subscriber", sub.id)
 
-		if err = sub.stream.Send(&ev); err != nil {
-			log.Printf("[req %d] warn, msg = \"%v\"", reqid, err)
+		if err = sub.githubStream.Send(&ev); err != nil {
+			hl.RemoveSubscription(repo, eventType, sub.id)
 		}
 	}
 }
 
 // GenID generates a new 64 bit ID for a subscription
 func (hl *Server) GenID() uint64 {
-	return unsafe_rand.Uint64()
+	return uint64(time.Now().Unix())
 }
 
 // Subscribe is for an implementation of the github proto service
 func (hl *Server) Subscribe(target *Target, stream Github_SubscribeServer) error {
-	log.Printf("[grpc-method Subscribe] status, msg = %q", "subscription requested")
-
+	stream.Send(&Event{})
 	return hl.AddSubscription(target.User+"/"+target.Repo, EventTypeToString(target.Event), Subscription{
-		stream: stream,
-		id:     hl.GenID(),
+		githubStream: stream,
 	})
 }
 
